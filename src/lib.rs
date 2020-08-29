@@ -3,11 +3,12 @@ use anyhow::{Context, Result};
 use futures::lock::Mutex;
 use futures::{FutureExt, StreamExt};
 use paho_mqtt as mqtt;
-use paho_mqtt::CreateOptions;
+use paho_mqtt::{ConnectOptionsBuilder, CreateOptions};
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 use std::io::ErrorKind;
 use std::path::Path;
+use std::time::Duration;
 use tokio::fs;
 use tokio::io::AsyncReadExt;
 use tokio::net::UnixListener;
@@ -45,8 +46,11 @@ impl LightServer {
 
         let async_client = mqtt::AsyncClient::new(mqtt_broker.clone())
             .with_context(|| format!("Failed to create client for: {:?}", mqtt_broker))?;
+        let connect_options = ConnectOptionsBuilder::new()
+            .automatic_reconnect(Duration::from_secs(1), Duration::from_secs(8))
+            .finalize();
         async_client
-            .connect(mqtt::ConnectOptions::new())
+            .connect(connect_options)
             .await
             .with_context(|| format!("Failed to connect to mqqt broker: {:?}", mqtt_broker))?;
         Ok(LightServer {
@@ -71,7 +75,7 @@ impl LightServer {
                     *curr_light_state = Some(decoded);
                 }
             }
-            Ok::<(), anyhow::Error>(())
+            Err(anyhow::anyhow!("Subscription stream returned None"))
         };
 
         let handle_ipc = async {
