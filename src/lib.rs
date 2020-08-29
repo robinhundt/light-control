@@ -5,6 +5,7 @@ use futures::{FutureExt, StreamExt};
 use paho_mqtt as mqtt;
 use paho_mqtt::CreateOptions;
 use serde::{Deserialize, Serialize};
+use std::fmt::Debug;
 use std::io::ErrorKind;
 use std::path::Path;
 use tokio::fs;
@@ -22,7 +23,7 @@ impl LightServer {
     pub async fn connect<P, T>(unix_socket: P, mqtt_broker: T) -> Result<Self>
     where
         P: AsRef<Path>,
-        T: Into<CreateOptions>,
+        T: Into<CreateOptions> + Debug + Clone,
     {
         match fs::remove_file(&unix_socket).await {
             Ok(_) => (),
@@ -42,8 +43,12 @@ impl LightServer {
             )
         })?;
 
-        let async_client = mqtt::AsyncClient::new(mqtt_broker)?;
-        async_client.connect(mqtt::ConnectOptions::new()).await?;
+        let async_client = mqtt::AsyncClient::new(mqtt_broker.clone())
+            .with_context(|| format!("Failed to create client for: {:?}", mqtt_broker))?;
+        async_client
+            .connect(mqtt::ConnectOptions::new())
+            .await
+            .with_context(|| format!("Failed to connect to mqqt broker: {:?}", mqtt_broker))?;
         Ok(LightServer {
             async_client,
             socket_listener,
@@ -55,7 +60,8 @@ impl LightServer {
 
         self.async_client
             .subscribe(light_topic, mqtt::QOS_0)
-            .await?;
+            .await
+            .with_context(|| format!("Unable to subscribe to topic: {}", light_topic))?;
         let mut stream = self.async_client.get_stream(1024);
         let handle_subscriptions = async {
             while let Some(item) = stream.next().await {
@@ -73,7 +79,7 @@ impl LightServer {
             let mut buf = Vec::new();
 
             while let Some(stream) = self.socket_listener.next().await {
-                let mut stream = stream?;
+                let mut stream = stream.context("Failed getting Unix stream")?;
                 stream.read_to_end(&mut buf).await?;
                 let msg: Message = bincode::deserialize(&buf)?;
                 buf.clear();
@@ -85,10 +91,13 @@ impl LightServer {
                         .compute_change(&msg)
                 };
                 let serialized = serde_json::to_string(&light_change)?;
-                let mqtt_msg = mqtt::Message::new(&light_topic_set, serialized, mqtt::QOS_1);
-                self.async_client.publish(mqtt_msg).await?;
+                let mqtt_msg = mqtt::Message::new(&light_topic_set, serialized, mqtt::QOS_0);
+                self.async_client
+                    .publish(mqtt_msg)
+                    .await
+                    .context("Failed publishing msg")?;
             }
-            Ok::<(), anyhow::Error>(())
+            Err(anyhow::anyhow!("Socket listener stream returned None"))
         };
 
         futures::select! {
